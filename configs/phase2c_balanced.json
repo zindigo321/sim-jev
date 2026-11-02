@@ -1,0 +1,31 @@
+{
+  "schema_version": "phase2c-paired-case-v1",
+  "scenario_id": "phase2c-balanced-v1",
+  "description": "Synthetic overlapping offers with nominal reserve and AFH tradeoffs; ordinary repair and replenishment support. Frozen before method comparison.",
+  "config": {
+    "fleet_size": 4,
+    "mission_rate_per_hour": 0,
+    "failure_rate_per_flight_hour": 0.012,
+    "repair_bays": 2,
+    "initial_spares": 3,
+    "reorder_target": 3,
+    "repair_duration_min_hours": 8,
+    "repair_duration_max_hours": 20,
+    "lead_time_min_hours": 24,
+    "lead_time_max_hours": 48,
+    "parameter_note": "Frozen phase-2C synthetic pipeline scenario; not calibrated aircraft data and not tuned to favor Jev."
+  },
+  "rule": {"min_reserve": 1, "full_window_afh": 105, "final_window_afh": 65, "mandatory_labels": ["M"]},
+  "mission_pattern_version": "nine-overlapping-offers-with-carry-v1",
+  "mission_templates": [
+    {"label": "M", "offset": 2, "duration_hours": 6, "aircraft_required": 1, "value": 20},
+    {"label": "A", "offset": 2, "duration_hours": 20, "aircraft_required": 2, "value": 85},
+    {"label": "B", "offset": 3, "duration_hours": 12, "aircraft_required": 1, "value": 50},
+    {"label": "C", "offset": 8, "duration_hours": 7, "aircraft_required": 2, "value": 60},
+    {"label": "D", "offset": 24, "duration_hours": 10, "aircraft_required": 1, "value": 40},
+    {"label": "E", "offset": 26, "duration_hours": 6, "aircraft_required": 2, "value": 55},
+    {"label": "F", "offset": 38, "duration_hours": 5, "aircraft_required": 1, "value": 25},
+    {"label": "H", "offset_from_end": -12, "duration_hours": 7, "aircraft_required": 2, "value": 70},
+    {"label": "G", "offset_from_end": -3, "duration_hours": 8, "aircraft_required": 1, "value": 45}
+  ]
+}

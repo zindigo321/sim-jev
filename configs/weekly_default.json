@@ -1,0 +1,83 @@
+{
+  "model_version": "synthetic-weekly-single-lru-v1",
+  "scenario_id": "weekly-default",
+  "config": {
+    "horizon_hours": 720.0,
+    "seed": 42,
+    "fleet_size": 12,
+    "mission_rate_per_hour": 0.12,
+    "mission_duration_min_hours": 2.0,
+    "mission_duration_max_hours": 6.0,
+    "mission_aircraft_min": 1,
+    "mission_aircraft_max": 3,
+    "mission_value_min": 50.0,
+    "mission_value_max": 150.0,
+    "failure_rate_per_flight_hour": 0.008,
+    "repair_bays": 2,
+    "repair_duration_min_hours": 4.0,
+    "repair_duration_max_hours": 12.0,
+    "initial_spares": 4,
+    "reorder_target": 4,
+    "reorder_interval_hours": 24.0,
+    "lead_time_min_hours": 24.0,
+    "lead_time_max_hours": 48.0,
+    "parameter_note": "All values are synthetic examples; no real-fleet calibration or strict paper replication."
+  },
+  "rules": [
+    {
+      "window_start": 0.0,
+      "window_end": 168.0,
+      "announced_at": 0.0,
+      "effective_at": 0.0,
+      "version": "default-rule-0",
+      "mandatory_ids": [],
+      "min_reserve": 1,
+      "max_aircraft_hours": 1400.0
+    },
+    {
+      "window_start": 168.0,
+      "window_end": 336.0,
+      "announced_at": 0.0,
+      "effective_at": 168.0,
+      "version": "default-rule-168",
+      "mandatory_ids": [],
+      "min_reserve": 2,
+      "max_aircraft_hours": 1400.0
+    },
+    {
+      "window_start": 336.0,
+      "window_end": 504.0,
+      "announced_at": 336.0,
+      "effective_at": 336.0,
+      "version": "default-rule-336",
+      "mandatory_ids": [],
+      "min_reserve": 1,
+      "max_aircraft_hours": 1400.0
+    },
+    {
+      "window_start": 504.0,
+      "window_end": 672.0,
+      "announced_at": 504.0,
+      "effective_at": 504.0,
+      "version": "default-rule-504",
+      "mandatory_ids": [],
+      "min_reserve": 2,
+      "max_aircraft_hours": 1400.0
+    },
+    {
+      "window_start": 672.0,
+      "window_end": 720.0,
+      "announced_at": 672.0,
+      "effective_at": 672.0,
+      "version": "default-rule-672",
+      "mandatory_ids": [],
+      "min_reserve": 1,
+      "max_aircraft_hours": 400.0
+    }
+  ],
+  "policy": {
+    "kind": "mandatory-first",
+    "name": "mandatory-first",
+    "commands": []
+  }
+}

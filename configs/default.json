@@ -1,0 +1,22 @@
+{
+  "horizon_hours": 720.0,
+  "seed": 42,
+  "fleet_size": 12,
+  "mission_rate_per_hour": 0.12,
+  "mission_duration_min_hours": 2.0,
+  "mission_duration_max_hours": 6.0,
+  "mission_aircraft_min": 1,
+  "mission_aircraft_max": 3,
+  "mission_value_min": 50.0,
+  "mission_value_max": 150.0,
+  "failure_rate_per_flight_hour": 0.008,
+  "repair_bays": 2,
+  "repair_duration_min_hours": 4.0,
+  "repair_duration_max_hours": 12.0,
+  "initial_spares": 4,
+  "reorder_target": 4,
+  "reorder_interval_hours": 24.0,
+  "lead_time_min_hours": 24.0,
+  "lead_time_max_hours": 48.0,
+  "parameter_note": "All values are synthetic examples; no real-fleet calibration or strict paper replication."
+}

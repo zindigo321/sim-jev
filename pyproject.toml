@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sim-jev"
+version = "0.1.0"
+description = "Synthetic aircraft fleet discrete-event research prototype"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0,<3",
+    "pandas>=2.0,<4",
+    "matplotlib>=3.8,<4",
+]
+
+[project.scripts]
+sim-jev = "sim_jev.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["sim_jev*"]

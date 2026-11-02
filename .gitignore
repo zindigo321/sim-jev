@@ -1,0 +1,42 @@
+# Experiment artifacts stay local.
+/runs/
+/audit-record/
+response-store/
+
+# Local audit bundles, ZIP checksums and packaging receipts.
+*.zip
+*.zip.*
+*.sha256
+*.verification.json
+*.receipt.json
+
+# Python build, test and package caches.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+/build/
+/dist/
+
+# Environments and machine-specific editor settings.
+.venv/
+venv/
+.conda/
+conda-env/
+env/
+.vscode/
+.idea/
+
+# Credentials and local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.DS_Store
+Thumbs.db
