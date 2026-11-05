@@ -6,6 +6,7 @@ from .reporting import (check_output_directory, _write_json, _write_csv, _missio
                         EVENT_COLUMNS, MISSION_COLUMNS, STATE_COLUMNS, REPAIR_COLUMNS, ORDER_COLUMNS)
 from .versions import WEEKLY_POLICY_VERSION, DAILY_POLICY_VERSION
 from .decision import policy_version
+from .branch_audit_store import save_checkpoint
 
 
 def write_weekly_run(sim, output_dir, *, run_context=None):
@@ -17,7 +18,7 @@ def write_weekly_run(sim, output_dir, *, run_context=None):
     _write_json(destination / "weekly-ledger.json", state)
     _write_json(destination / "policy-observation.json", sim.get_observation().to_dict())
     _write_json(destination / "random-manifest.json", sim.keyed_rng.to_dict())
-    _write_json(destination / "checkpoint.json", sim.to_checkpoint())
+    save_checkpoint(destination / "checkpoint.json", sim.to_checkpoint())
     _write_json(destination / "runtime.json", runtime_metadata(
         sim.config.to_dict(), run_context=run_context, model_version=sim.model_version,
         rng_protocol_version=sim.rng_protocol_version,

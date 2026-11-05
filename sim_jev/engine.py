@@ -14,6 +14,7 @@ from .config import Config, require_number
 from .metrics import Metrics, summarize
 from .models import Aircraft, Event, Mission, MissionSpec, Order, Repair
 from .policy import dispatch_aircraft, prioritize_repairs, reorder_quantity
+from .versions import ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2
 
 
 EVENT_PRIORITY = {
@@ -31,7 +32,11 @@ class Simulation:
     """
 
     def __init__(self, config: Config, missions: Iterable[MissionSpec] | None = None,
-                 initial_lifetimes: Sequence[float] | None = None):
+                 initial_lifetimes: Sequence[float] | None = None, *,
+                 arithmetic_protocol: str = ARITHMETIC_PROTOCOL_LEGACY):
+        if arithmetic_protocol not in {ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2}:
+            raise ValueError("unsupported arithmetic protocol")
+        self.arithmetic_protocol = arithmetic_protocol
         config.validate()
         self.config = config
         self._input_missions = None if missions is None else tuple(missions)
@@ -80,6 +85,7 @@ class Simulation:
         self._schedule_initial_events()
         self._snapshot()
         self.assert_invariants()
+        self._commit_accumulation_anchor()
         return self.get_observation()
 
     def _reset_randomness(self) -> None:
@@ -164,7 +170,46 @@ class Simulation:
         self.history.append({"time": self.now, **counts, "on_hand": self.on_hand,
                              "in_transit": self.in_transit, "unmet_demand": self.unmet_demand})
 
+    def _commit_accumulation_anchor(self) -> None:
+        """Commit integrals only at a physical/control boundary, never a pause."""
+        if getattr(self, "arithmetic_protocol", ARITHMETIC_PROTOCOL_LEGACY) != ARITHMETIC_PROTOCOL_V2:
+            return
+        from copy import deepcopy
+        names = ("available_aircraft_hours", "idle_aircraft_hours", "flight_hours",
+                 "spare_wait_hours", "bay_wait_hours")
+        self._accumulation_anchor = {
+            "time": self.now,
+            "metrics": {name: getattr(self.metrics, name) for name in names},
+            "aircraft": {key: value.flight_hours for key, value in self.aircraft.items()},
+            "missions": {key: value.flight_hours for key, value in self.missions.items()},
+            "repairs": {key: {name: getattr(value, name) for name in
+                              ("spare_wait_hours", "bay_wait_hours")}
+                        for key, value in self.repairs.items()},
+        }
+        if hasattr(self, "weekly_state"):
+            self._accumulation_anchor["window_metrics"] = deepcopy(self.weekly_state["window_metrics"])
+
+    def _restore_accumulation_anchor(self) -> None:
+        """Discard the previous pause projection before advancing the same span."""
+        if getattr(self, "arithmetic_protocol", ARITHMETIC_PROTOCOL_LEGACY) != ARITHMETIC_PROTOCOL_V2:
+            return
+        from copy import deepcopy
+        anchor = self._accumulation_anchor
+        for key, value in anchor["metrics"].items():
+            setattr(self.metrics, key, value)
+        for key, value in anchor["aircraft"].items():
+            self.aircraft[key].flight_hours = value
+        for key, value in anchor["missions"].items():
+            self.missions[key].flight_hours = value
+        for key, values in anchor["repairs"].items():
+            for name, value in values.items():
+                setattr(self.repairs[key], name, value)
+        if "window_metrics" in anchor:
+            self.weekly_state["window_metrics"] = deepcopy(anchor["window_metrics"])
+        self.now = anchor["time"]
+
     def _advance(self, target: float) -> None:
+        self._restore_accumulation_anchor()
         dt = target - self.now
         if dt == 0:
             return
@@ -207,6 +252,7 @@ class Simulation:
                 event = heapq.heappop(self._queue)
                 self._advance(event.time)
                 handlers[event.kind](event)
+                self._commit_accumulation_anchor()
                 self.assert_invariants()
                 self._snapshot()
             if self.now < target:

@@ -10,7 +10,7 @@ import json
 import math
 
 from .candidates import Candidate
-from .decision import DecisionRequest
+from .decision import DecisionRequest, DECISION_PROTOCOL_VERSION_V2
 from .jev import (MODEL, TEMPLATE_VERSION, INSTRUCTIONS, build_choice_request,
                   validate_response)
 from .planning import (PLANNING_INPUT_VERSION, PLANNING_MODEL_VERSION,
@@ -179,6 +179,9 @@ def _validate_record(record, policy, sim):
     request = DecisionRequest.from_dict(record["request"])
     point, end = request.context.window_start, request.context.window_end
     historical, carry = historical_observation(sim, point)
+    if request.protocol_version == DECISION_PROTOCOL_VERSION_V2:
+        _check(request.observation.to_dict() == historical,
+               "v2 public facts differ from the exact physical-event accumulation")
     _same_public(request.observation.to_dict(), historical)
     _same_public(list(request.context.carry_missions), carry, "public.carry")
     pool = [Candidate(row["id"], WeeklyCommand.from_dict(row["command"]), row["summary"])
@@ -188,7 +191,12 @@ def _validate_record(record, policy, sim):
     _check(len(ids) == len(pool), "duplicate candidate")
     jev = record["jev"]
     _check(type(record["fallback"]) is bool, "fallback must be boolean")
-    if policy.method in {"jev-direct", "jev-des"}:
+    if policy.method in {"local-direct", "local-des"}:
+        from .local_provider import validate_record as validate_local
+        _check(jev is None and record["fallback"] is False, "local evidence cannot impersonate Jev/fallback")
+        validate_local(record["local"], request, pool, policy.identity)
+        _check(record["ranking_ids"] == record["local"]["ranked_ids"], "local ranking differs")
+    elif policy.method in {"jev-direct", "jev-des"}:
         _check(type(jev) is dict, "Jev method has no adapter record")
         _check(all(type(jev.get(key)) is bool for key in
                    ("valid_response", "valid_jev", "fallback_required", "uncertain")) and
@@ -236,7 +244,7 @@ def _validate_record(record, policy, sim):
             expected_ranking = _heuristic_ids(pool)
         _check(record["ranking_ids"] == expected_ranking, "frozen screening order differs")
 
-    total = 0 if len(pool) < 2 or policy.method == "jev-direct" else min(policy.top_k, len(pool)) * policy.scenarios_per_candidate
+    total = 0 if len(pool) < 2 or policy.method in {"jev-direct", "local-direct"} else min(policy.top_k, len(pool)) * policy.scenarios_per_candidate
     if policy.method == "direct-des":
         allocation = [(ids[i % len(ids)], i // len(ids)) for i in range(total)]
     else:

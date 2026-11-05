@@ -17,10 +17,13 @@ from .models import MissionSpec
 from .weekly_policy import (PolicyObservation, PolicySpec, RuleContext, RuleSpec,
                             validate_command)
 from .decision import (DecisionPolicySpec, DecisionRequest, ModelParameters,
-                       DECISION_PROTOCOL_VERSION, policy_from_dict)
+                       DECISION_PROTOCOL_VERSION, DECISION_PROTOCOL_VERSION_V2, policy_from_dict)
 from .decision_resolver import resolve_decision
+from .local_policy import LocalDecisionPolicySpec
 from .versions import (WEEKLY_MODEL_VERSION, KEYED_RNG_PROTOCOL_VERSION,
-                       WEEKLY_CHECKPOINT_SCHEMA_VERSION, DAILY_POLICY_VERSION)
+                       WEEKLY_CHECKPOINT_SCHEMA_VERSION, DAILY_POLICY_VERSION,
+                       ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2,
+                       WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION)
 
 WEEK_POINTS = (0., 168., 336., 504., 672.)
 DAY_POINTS = tuple(float(t) for t in range(0, 720, 24))
@@ -31,16 +34,22 @@ INTEGRALS = ("flight_hours", "available_aircraft_hours", "idle_aircraft_hours",
 class WeeklySimulation(Simulation):
     model_version = WEEKLY_MODEL_VERSION
     rng_protocol_version = KEYED_RNG_PROTOCOL_VERSION
-    checkpoint_schema_version = WEEKLY_CHECKPOINT_SCHEMA_VERSION
+
+    @property
+    def checkpoint_schema_version(self):
+        return (WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION
+                if self.arithmetic_protocol == ARITHMETIC_PROTOCOL_V2
+                else WEEKLY_CHECKPOINT_SCHEMA_VERSION)
 
     def __init__(self, config: Config, missions=None, initial_lifetimes=None, *,
-                 scenario_id="weekly-synthetic", rules=None, policy=None, decision_runtime=None):
+                 scenario_id="weekly-synthetic", rules=None, policy=None, decision_runtime=None,
+                 arithmetic_protocol=ARITHMETIC_PROTOCOL_LEGACY):
         if config.horizon_hours != 720 or config.reorder_interval_hours != 24:
             raise ValueError("weekly mode requires horizon_hours=720 and reorder_interval_hours=24")
         if not isinstance(scenario_id, str) or not scenario_id.strip():
             raise ValueError("scenario_id must be nonempty text")
         policy = PolicySpec() if policy is None else policy
-        if not isinstance(policy, (PolicySpec, DecisionPolicySpec)):
+        if not isinstance(policy, (PolicySpec, DecisionPolicySpec, LocalDecisionPolicySpec)):
             raise ValueError("policy must be a serializable PolicySpec, not a callback")
         self._decision_runtime = decision_runtime
         supplied = [] if rules is None else list(rules)
@@ -57,7 +66,7 @@ class WeeklySimulation(Simulation):
         self.weekly_state = {"scenario_id": scenario_id,
                              "policy_spec": policy.to_dict(),
                              "rules_input": [r.to_dict() for r in sorted(supplied, key=lambda r: r.window_start)]}
-        super().__init__(config, missions, initial_lifetimes)
+        super().__init__(config, missions, initial_lifetimes, arithmetic_protocol=arithmetic_protocol)
         ids = set(self.missions)
         for rule in supplied:
             if not set(rule.mandatory_ids) <= ids:
@@ -77,10 +86,15 @@ class WeeklySimulation(Simulation):
             "window_metrics": {str(int(t)): {key: 0. for key in INTEGRALS} for t in WEEK_POINTS},
             "closed_cohort_snapshots": [], "terminal_boundary": None,
         }
-        if inputs["policy_spec"]["kind"] == "candidate-des":
-            self.weekly_state.update(decision_protocol_version=DECISION_PROTOCOL_VERSION,
+        if inputs["policy_spec"]["kind"] in {"candidate-des", "local-candidate-des"}:
+            self.weekly_state.update(decision_protocol_version=self.decision_protocol_version,
                                      decision_records=[])
         return super().reset(seed)
+
+    @property
+    def decision_protocol_version(self):
+        return (DECISION_PROTOCOL_VERSION_V2 if self.arithmetic_protocol == ARITHMETIC_PROTOCOL_V2
+                else DECISION_PROTOCOL_VERSION)
 
     def _reset_randomness(self):
         self._rngs = {}
@@ -139,6 +153,7 @@ class WeeklySimulation(Simulation):
             index += 1
 
     def _advance(self, target):
+        self._restore_accumulation_anchor()
         before = {key: getattr(self.metrics, key) for key in INTEGRALS}
         window = str(int(min(672, math.floor(self.now / 168) * 168)))
         super()._advance(target)
@@ -171,7 +186,8 @@ class WeeklySimulation(Simulation):
         self._log("weekly_offer", key, offered_ids=offered, window_end=end)
         context = self._rule_context(point)
         request = DecisionRequest.create(self.get_observation(), context,
-                                         ModelParameters.from_config(self.config))
+                                         ModelParameters.from_config(self.config),
+                                         protocol_version=self.decision_protocol_version)
         return request, offered
 
     def _publish_and_commit(self):
@@ -281,6 +297,7 @@ class WeeklySimulation(Simulation):
                 self._advance(time)
                 drain(physical_only=True)
                 if stop_before_control and time == target:
+                    self._commit_accumulation_anchor()
                     self._close_cohorts()
                     self._snapshot()
                     break
@@ -292,6 +309,7 @@ class WeeklySimulation(Simulation):
                     self._daily_command()
                     self._snapshot()
                 drain()
+                self._commit_accumulation_anchor()
             if self.now < target:
                 self._advance(float(target))
                 self._snapshot()
@@ -300,6 +318,7 @@ class WeeklySimulation(Simulation):
                 self.weekly_state["terminal_boundary"] = boundary
                 self._close_cohorts()
                 self._log("terminal_boundary", "720", **boundary)
+                self._commit_accumulation_anchor()
             self.assert_invariants()
             self._checkpoint_ready = not stop_before_control or self.now == 720
         except BaseException:
@@ -385,6 +404,9 @@ class WeeklySimulation(Simulation):
                                                 for c in self.weekly_state["cohorts"].values()),
                       window_metrics=deepcopy(self.weekly_state["window_metrics"]),
                       terminal_boundary=deepcopy(self.weekly_state["terminal_boundary"]))
+        if self.arithmetic_protocol == ARITHMETIC_PROTOCOL_V2:
+            result["arithmetic_protocol"] = self.arithmetic_protocol
+            result["decision_protocol_version"] = self.decision_protocol_version
         return result
 
     def assert_invariants(self):

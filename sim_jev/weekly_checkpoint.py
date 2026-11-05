@@ -13,7 +13,9 @@ from pathlib import Path
 
 from . import checkpoint as common
 from .keyed_rng import KeyedRNG
-from .versions import DAILY_POLICY_VERSION, WEEKLY_POLICY_VERSION
+from .versions import (DAILY_POLICY_VERSION, WEEKLY_POLICY_VERSION,
+                       ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2,
+                       WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION)
 from .decision import DECISION_PROTOCOL_VERSION, policy_from_dict, policy_version
 
 
@@ -61,7 +63,7 @@ def restore_weekly_state(sim, source):
                                 WeeklyCommand, validate_command)
 
     state = common._json_copy(source, "weekly_state")
-    new_policy = isinstance(state.get("policy_spec"), dict) and state["policy_spec"].get("kind") == "candidate-des"
+    new_policy = isinstance(state.get("policy_spec"), dict) and state["policy_spec"].get("kind") in {"candidate-des", "local-candidate-des"}
     fields = WEEKLY_STATE_FIELDS | ({"decision_protocol_version", "decision_records"} if new_policy else set())
     common._shape(state, fields, "weekly_state")
     common._check(state.pop("policy_versions") ==
@@ -224,7 +226,7 @@ def restore_weekly_state(sim, source):
     sim.weekly_state, sim.keyed_rng = state, rng
     sim._decision_runtime = None
     if new_policy:
-        common._check(state["decision_protocol_version"] == DECISION_PROTOCOL_VERSION,
+        common._check(state["decision_protocol_version"] == sim.decision_protocol_version,
                       "weekly_state.decision_protocol_version", "unsupported decision protocol")
         from .decision_resolver import validate_decision_records
         validate_decision_records(sim)
@@ -484,14 +486,18 @@ def validate_weekly_log_totals(sim, counts):
 
 
 def to_checkpoint(sim):
-    return common.to_checkpoint(sim, profile="weekly")
+    profile = ("weekly_v2" if getattr(sim, "arithmetic_protocol", ARITHMETIC_PROTOCOL_LEGACY)
+               == ARITHMETIC_PROTOCOL_V2 else "weekly")
+    return common.to_checkpoint(sim, profile=profile)
 
 
 def from_checkpoint(data, cls=None):
     if cls is None:
         from .weekly import WeeklySimulation
         cls = WeeklySimulation
-    return common.from_checkpoint(data, cls, profile="weekly")
+    profile = ("weekly_v2" if data.get("schema_version") == WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION
+               else "weekly")
+    return common.from_checkpoint(data, cls, profile=profile)
 
 
 def save_checkpoint(sim, path):

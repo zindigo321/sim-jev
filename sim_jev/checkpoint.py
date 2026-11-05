@@ -17,7 +17,9 @@ import numpy as np
 from .config import Config, require_integer, require_number
 from .metrics import Metrics
 from .models import Aircraft, Event, Mission, MissionSpec, Order, Repair
-from .versions import CHECKPOINT_SCHEMA_VERSION, MODEL_VERSION, RNG_PROTOCOL_VERSION
+from .versions import (CHECKPOINT_SCHEMA_VERSION, MODEL_VERSION, RNG_PROTOCOL_VERSION,
+                       ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2,
+                       WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION)
 
 
 INFINITY_ENCODING = "positive-infinity-tag-v1"
@@ -160,14 +162,19 @@ def _profile(name):
     """Select an explicit contract without rewriting a snapshot's identity."""
     if name == "legacy":
         return MODEL_VERSION, RNG_PROTOCOL_VERSION, CHECKPOINT_SCHEMA_VERSION, ROOT_FIELDS, STREAMS
-    if name == "weekly":
+    if name in {"weekly", "weekly_v2"}:
         from .weekly_checkpoint import MODEL_VERSION as weekly_model, RNG_PROTOCOL_VERSION as weekly_rng
         from .weekly_checkpoint import CHECKPOINT_SCHEMA_VERSION as weekly_schema
+        if name == "weekly_v2":
+            return (weekly_model, weekly_rng, WEEKLY_ANCHORED_CHECKPOINT_SCHEMA_VERSION,
+                    ROOT_FIELDS | {"weekly_state", "arithmetic_protocol", "accumulation_anchor"}, ())
         return weekly_model, weekly_rng, weekly_schema, ROOT_FIELDS | {"weekly_state"}, ()
     raise ValueError(f"checkpoint: unknown model profile {name!r}")
 
 
 def to_checkpoint(sim, *, profile="legacy"):
+    if profile == "legacy" and getattr(sim, "arithmetic_protocol", ARITHMETIC_PROTOCOL_LEGACY) != ARITHMETIC_PROTOCOL_LEGACY:
+        raise ValueError("anchored arithmetic requires the explicit weekly checkpoint schema 2")
     if sim._running or not sim._checkpoint_ready or any(e.time <= sim.now for e in sim._queue):
         raise ValueError("checkpoint: requires a successful run(until=t) at a stable boundary; call run(0) after reset")
     aircraft = [asdict(a) for a in sim.aircraft.values()]
@@ -191,9 +198,12 @@ def to_checkpoint(sim, *, profile="legacy"):
             _encode_life(v, f"initial_lifetimes[{i}]") for i, v in enumerate(sim._initial_lifetimes)],
         "events": sim.events, "history": sim.history,
     }
-    if profile == "weekly":
+    if profile in {"weekly", "weekly_v2"}:
         from .weekly_checkpoint import export_weekly_state
         data["weekly_state"] = export_weekly_state(sim)
+    if profile == "weekly_v2":
+        data["arithmetic_protocol"] = sim.arithmetic_protocol
+        data["accumulation_anchor"] = sim._accumulation_anchor
     data = _json_copy(data)
     # The same validator guards both inbound corruption and accidental mutation
     # of an instance before export. No random variates are drawn in restoration.
@@ -205,7 +215,7 @@ def from_checkpoint(data, cls, *, profile="legacy"):
     from .engine import EVENT_PRIORITY
 
     model_version, rng_protocol, schema_version, root_fields, streams = _profile(profile)
-    weekly = profile == "weekly"
+    weekly = profile in {"weekly", "weekly_v2"}
     data = _json_copy(data)
     _shape(data, root_fields, "root")
     _integer(data["schema_version"], "schema_version", 1)
@@ -486,6 +496,12 @@ def from_checkpoint(data, cls, *, profile="legacy"):
         rngs[name] = np.random.Generator(bit_generator)
 
     sim = cls.__new__(cls)
+    sim.arithmetic_protocol = (ARITHMETIC_PROTOCOL_V2 if profile == "weekly_v2"
+                               else ARITHMETIC_PROTOCOL_LEGACY)
+    if profile == "weekly_v2":
+        _check(data["arithmetic_protocol"] == ARITHMETIC_PROTOCOL_V2,
+               "arithmetic_protocol", "unsupported cumulative arithmetic protocol")
+        sim._accumulation_anchor = data["accumulation_anchor"]
     sim.config, sim.now, sim.on_hand = config, now, data["on_hand"]
     sim.aircraft, sim.missions, sim.repairs, sim.orders = aircraft, missions, repairs, orders
     sim._queue, sim._sequence, sim.metrics = queue, data["event_sequence"], metrics
@@ -499,6 +515,8 @@ def from_checkpoint(data, cls, *, profile="legacy"):
         restore_weekly_state(sim, data["weekly_state"])
     _validate_logs(sim, data["log_sequence"], profile=profile)
     _validate_history(sim)
+    if profile == "weekly_v2":
+        _validate_accumulation_anchor(sim)
     # Existing physical invariants remain unchanged; wrap their errors with the
     # checkpoint boundary to make malformed input distinguishable from reset.
     try:
@@ -506,6 +524,51 @@ def from_checkpoint(data, cls, *, profile="legacy"):
     except (KeyError, RuntimeError, TypeError) as exc:
         raise ValueError(f"checkpoint.entities: {exc}") from exc
     return sim
+
+
+def _validate_accumulation_anchor(sim):
+    """Validate the saved uncommitted span without executing events or policies."""
+    from copy import deepcopy
+    anchor = sim._accumulation_anchor
+    path = "accumulation_anchor"
+    _shape(anchor, {"time", "metrics", "aircraft", "missions", "repairs", "window_metrics"}, path)
+    _number(anchor["time"], path + ".time", maximum=sim.now)
+    # Every committed physical/control boundary has a business-log timestamp.
+    # An arbitrary pause has none and must not become the anchor on restoration.
+    boundary = max((row["time"] for row in sim.events), default=0.)
+    _check(anchor["time"] == boundary, path + ".time", "must be the last physical/control boundary")
+    integral_names = {"available_aircraft_hours", "idle_aircraft_hours", "flight_hours",
+                      "spare_wait_hours", "bay_wait_hours"}
+    _shape(anchor["metrics"], integral_names, path + ".metrics")
+    for key, value in anchor["metrics"].items():
+        _number(value, path + ".metrics." + key, maximum=getattr(sim.metrics, key))
+    for name in ("aircraft", "missions", "repairs"):
+        entities = getattr(sim, name)
+        _shape(anchor[name], entities, path + "." + name)
+        for key, value in anchor[name].items():
+            if name == "repairs":
+                _shape(value, {"spare_wait_hours", "bay_wait_hours"}, path + ".repairs." + key)
+                for field, scalar in value.items():
+                    _number(scalar, path + ".repairs." + key + "." + field,
+                            maximum=getattr(entities[key], field))
+            else:
+                _number(value, path + "." + name + "." + key,
+                        maximum=entities[key].flight_hours)
+    _shape(anchor["window_metrics"], sim.weekly_state["window_metrics"], path + ".window_metrics")
+    for window, values in anchor["window_metrics"].items():
+        _shape(values, integral_names, path + ".window_metrics." + window)
+        for key, value in values.items():
+            _number(value, path + ".window_metrics." + window + "." + key,
+                    maximum=sim.weekly_state["window_metrics"][window][key])
+    reconstructed = deepcopy(sim)
+    reconstructed._advance(sim.now)
+    _check(asdict(reconstructed.metrics) == asdict(sim.metrics), path, "current metrics differ from anchored span")
+    for name in ("aircraft", "missions", "repairs"):
+        _check([asdict(item) for item in getattr(reconstructed, name).values()] ==
+               [asdict(item) for item in getattr(sim, name).values()],
+               path + "." + name, "current entities differ from anchored span")
+    _check(reconstructed.weekly_state["window_metrics"] == sim.weekly_state["window_metrics"],
+           path + ".window_metrics", "current window metrics differ from anchored span")
 
 
 def _validate_logs(sim, log_sequence, *, profile="legacy"):
@@ -534,7 +597,7 @@ def _validate_logs(sim, log_sequence, *, profile="legacy"):
         "order_arrival": {("in_transit", "arrived")}, "reorder_check": {("", "")}, "stale_event": {("", "")},
     }
     weekly_log_kinds = set()
-    if profile == "weekly":
+    if profile in {"weekly", "weekly_v2"}:
         from .weekly_checkpoint import log_contract, validate_weekly_log, validate_weekly_log_totals
         extra_refs, extra_fields, extra_transitions = log_contract(sim)
         weekly_log_kinds = set(extra_refs)
@@ -628,7 +691,7 @@ def _validate_logs(sim, log_sequence, *, profile="legacy"):
                            ("mission_not_executed", sum(m.status == "not_executed" for m in sim.missions.values()))):
         _check(counts.get(kind, 0) == expected, "events." + kind, "ledger count mismatch")
     _check(last_check is not None, "events.reorder_check", "missing initial inventory review; call run(0)")
-    if profile == "weekly":
+    if profile in {"weekly", "weekly_v2"}:
         validate_weekly_log_totals(sim, counts)
         _check(not any(e.kind == "reorder_check" for e in sim._queue), "event_queue.reorder_check",
                "weekly replenishment must have no independent queued review")
