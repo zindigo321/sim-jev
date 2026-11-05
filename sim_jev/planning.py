@@ -14,12 +14,13 @@ import json
 import math
 
 from .config import Config, require_integer
-from .decision import DecisionRequest
+from .decision import DecisionRequest, DECISION_PROTOCOL_VERSION_V2
 from .keyed_rng import KeyedRNG
 from .metrics import Metrics
 from .models import Aircraft, Mission, MissionSpec, Order, Repair
 from .weekly import DAY_POINTS, INTEGRALS, WEEK_POINTS, WeeklySimulation
 from .weekly_policy import PolicySpec, WeeklyCommand, validate_command
+from .versions import ARITHMETIC_PROTOCOL_LEGACY, ARITHMETIC_PROTOCOL_V2
 
 
 PLANNING_MODEL_VERSION = "conditional-weekly-single-lru-v1"
@@ -116,7 +117,7 @@ class PlanningSimulation(WeeklySimulation):
         return result
 
     def planning_state(self):
-        return _finite({
+        result = _finite({
             "domain": "planning", "model_version": PLANNING_MODEL_VERSION,
             "conditional_distribution_version": CONDITIONAL_DISTRIBUTION_VERSION,
             "origin": deepcopy(self.origin), "time": self.now,
@@ -130,6 +131,10 @@ class PlanningSimulation(WeeklySimulation):
             "events": deepcopy(self.events), "history": deepcopy(self.history),
             "random_manifest": self.keyed_rng.to_dict(),
         })
+        if self.arithmetic_protocol == ARITHMETIC_PROTOCOL_V2:
+            result["arithmetic_protocol"] = self.arithmetic_protocol
+            result["accumulation_anchor"] = deepcopy(self._accumulation_anchor)
+        return result
 
 
 def _construct(inputs, legal_input_hash, scenario_id):
@@ -137,6 +142,9 @@ def _construct(inputs, legal_input_hash, scenario_id):
     observation, context = request.observation, request.context
     now = observation.time
     sim = PlanningSimulation.__new__(PlanningSimulation)
+    sim.arithmetic_protocol = (ARITHMETIC_PROTOCOL_V2
+                               if request.protocol_version == DECISION_PROTOCOL_VERSION_V2
+                               else ARITHMETIC_PROTOCOL_LEGACY)
     parameters = request.parameters.to_dict()
     allowed = {field.name for field in fields(Config)} - {"seed", "initial_spares"}
     public_config = {key: value for key, value in parameters.items() if key in allowed}
@@ -248,6 +256,7 @@ def _construct(inputs, legal_input_hash, scenario_id):
     }
     sim._snapshot()
     sim.assert_invariants()
+    sim._commit_accumulation_anchor()
     return sim
 
 

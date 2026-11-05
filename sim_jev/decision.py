@@ -10,6 +10,7 @@ from .versions import DAILY_POLICY_VERSION, WEEKLY_POLICY_VERSION
 from .weekly_policy import PolicyObservation, PolicySpec, RuleContext, WeeklyCommand
 
 DECISION_PROTOCOL_VERSION = "legal-weekly-request-v1"
+DECISION_PROTOCOL_VERSION_V2 = "legal-weekly-request-v2"
 DECISION_POLICY_VERSION = "candidate-choice-des-v1"
 
 
@@ -86,7 +87,7 @@ class DecisionRequest:
     protocol_version: str = DECISION_PROTOCOL_VERSION
 
     def __post_init__(self):
-        if self.protocol_version != DECISION_PROTOCOL_VERSION:
+        if self.protocol_version not in {DECISION_PROTOCOL_VERSION, DECISION_PROTOCOL_VERSION_V2}:
             raise ValueError("unsupported decision request version")
         if not isinstance(self.observation, PolicyObservation) or not isinstance(self.context, RuleContext):
             raise ValueError("decision requires public observation and context")
@@ -123,11 +124,11 @@ class DecisionRequest:
         return {**self._content(), "request_id": self.request_id}
 
     @classmethod
-    def create(cls, observation, context, parameters):
-        content = {"protocol_version": DECISION_PROTOCOL_VERSION,
+    def create(cls, observation, context, parameters, *, protocol_version=DECISION_PROTOCOL_VERSION):
+        content = {"protocol_version": protocol_version,
                    "observation": observation.to_dict(), "context": context.to_dict(),
                    "parameters": parameters.to_dict()}
-        return cls(observation, context, parameters, canonical_sha256(content))
+        return cls(observation, context, parameters, canonical_sha256(content), protocol_version)
 
     @classmethod
     def from_dict(cls, data):
@@ -174,11 +175,17 @@ class DecisionPolicySpec:
 
 
 def policy_from_dict(data):
+    if data.get("kind") == "local-candidate-des":
+        from .local_policy import LocalDecisionPolicySpec
+        return LocalDecisionPolicySpec.from_dict(data)
     return (DecisionPolicySpec.from_dict(data) if data.get("kind") == "candidate-des"
             else PolicySpec.from_dict(data))
 
 
 def policy_version(data):
+    if data.get("kind") == "local-candidate-des":
+        from .local_policy import LocalDecisionPolicySpec
+        return LocalDecisionPolicySpec.from_dict(data).version
     return DECISION_POLICY_VERSION if data.get("kind") == "candidate-des" else WEEKLY_POLICY_VERSION
 
 

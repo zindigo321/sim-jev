@@ -8,6 +8,8 @@ from .decision import (DecisionRequest, DecisionResult, DecisionPolicySpec, Mode
                        DECISION_PROTOCOL_VERSION, DECISION_POLICY_VERSION)
 from .weekly_policy import PolicySpec, WeeklyCommand, choose_command, validate_command
 from .provenance import canonical_sha256
+from .local_policy import LocalDecisionPolicySpec
+from .decision import policy_from_dict, policy_version
 
 BUDGET_VERSION = "min-k-m-times-b-round-robin-direct-v1"
 
@@ -17,6 +19,7 @@ class DecisionRuntime:
     """Optional external services. Never exported or pickled with a simulation."""
     jev_adapter: object = None
     branch_auditor: object = None
+    local_provider: object = None
 
 
 def _adapter(policy, runtime):
@@ -58,7 +61,7 @@ def select_from_pool(request, policy, pool, runtime=None):
     from .planning import PlanningInput, PlanningScenario
     from .jev import JevError, build_choice_request
     start = time.perf_counter()
-    if not isinstance(request, DecisionRequest) or not isinstance(policy, DecisionPolicySpec):
+    if not isinstance(request, DecisionRequest) or not isinstance(policy, (DecisionPolicySpec, LocalDecisionPolicySpec)):
         raise ValueError("candidate selection requires versioned legal request and policy")
     # Own the request and pool so a caller cannot mutate records while selecting.
     request = DecisionRequest.from_dict(request.to_dict())
@@ -73,9 +76,17 @@ def select_from_pool(request, policy, pool, runtime=None):
     stable = sorted(pool, key=lambda item: item.id)
     ranked = heuristic_ranking(pool)
     jev, fallback = None, False
+    local = None
     if policy.method == "random-des":
         ranked = sorted(pool, key=lambda c: (canonical_sha256({"protocol": "random-screen-v1",
             "planning_seed": policy.planning_seed, "request_id": request.request_id, "candidate_id": c.id}), c.id))
+    elif isinstance(policy, LocalDecisionPolicySpec):
+        provider = getattr(runtime, "local_provider", None)
+        if provider is None or provider.identity != policy.identity:
+            raise ValueError("local runtime provider identity differs from serialized policy")
+        local = provider.rank(request, pool)
+        by_id = {c.id: c for c in pool}
+        ranked = [by_id[key] for key in local["ranked_ids"]]
     elif policy.method in {"jev-direct", "jev-des"}:
         payload = build_choice_request(request, pool)
         try:
@@ -96,7 +107,7 @@ def select_from_pool(request, policy, pool, runtime=None):
                    "error_code": exc.code, "fallback_policy": "fixed-heuristic-v1"}
     branches, scenarios = [], {}
     total = min(policy.top_k, len(pool)) * policy.scenarios_per_candidate if len(pool) > 1 else 0
-    if policy.method == "jev-direct":
+    if policy.method in {"jev-direct", "local-direct"}:
         total = 0
         chosen = (next(c for c in pool if c.id == jev["choice"])
                   if pool and jev and jev.get("valid_response") else (ranked[0] if ranked else None))
@@ -111,8 +122,11 @@ def select_from_pool(request, policy, pool, runtime=None):
         for candidate, index in allocation:
             if index not in scenarios:
                 scenarios[index] = PlanningScenario(PlanningInput(request, policy.planning_seed, index))
-            result = scenarios[index].evaluate(candidate.command)
             auditor = getattr(runtime, "branch_auditor", None)
+            before_branch = getattr(auditor, "before_branch", None)
+            if before_branch is not None:
+                before_branch(request, candidate, index, scenarios[index])
+            result = scenarios[index].evaluate(candidate.command)
             if auditor is not None:
                 auditor(result, request)
             # The full branch artifact is available via PlanningScenario; the
@@ -132,7 +146,7 @@ def select_from_pool(request, policy, pool, runtime=None):
     command = (chosen.command if chosen is not None else
                choose_command(request.observation, request.context, PolicySpec()))
     record = {
-        "protocol_version": DECISION_PROTOCOL_VERSION, "policy_version": DECISION_POLICY_VERSION,
+        "protocol_version": request.protocol_version, "policy_version": policy_version(policy.to_dict()),
         "request": request.to_dict(), "method": policy.method,
         "pool": [candidate.to_dict() for candidate in stable],
         "pool_sha256": canonical_sha256([candidate.to_dict() for candidate in stable]),
@@ -149,6 +163,8 @@ def select_from_pool(request, policy, pool, runtime=None):
         "jev": jev,
         "execution_audit": {"end_to_end_seconds": time.perf_counter() - start},
     }
+    if isinstance(policy, LocalDecisionPolicySpec):
+        record["local"] = local
     if len(branches) != total:
         raise RuntimeError("DES budget mismatch")
     return DecisionResult(command, record)
@@ -162,6 +178,13 @@ def logical_decision_record(record):
     """
     value = deepcopy(record)
     value.pop("execution_audit", None)
+    if value.get("local") is not None:
+        local = value["local"]
+        value["local"] = {key: local[key] for key in (
+            "protocol", "identity", "cache_key", "rendered", "ranked_ids", "choice", "score", "probability",
+            "confidence", "score_semantics", "valid_local_model", "valid_jev", "full_request_verified")}
+        if local['protocol']=='local-preference-scores-v2':
+            value['local'].update({key:local[key] for key in ('preference_scores','ties','sort_rule')})
     if value.get("jev") is not None:
         jev = value["jev"]
         value["jev"] = {key: jev.get(key) for key in (
@@ -179,11 +202,12 @@ def validate_decision_records(sim):
     records = state["decision_records"]
     if not isinstance(records, list) or len(records) != len(state["weekly_commands"]):
         raise ValueError("decision ledger count differs from committed commands")
-    policy = DecisionPolicySpec.from_dict(state["policy_spec"])
+    policy = policy_from_dict(state["policy_spec"])
     for record, committed in zip(records, state["weekly_commands"]):
         request = DecisionRequest.from_dict(record["request"])
-        if (record["protocol_version"] != DECISION_PROTOCOL_VERSION or
-                record["policy_version"] != DECISION_POLICY_VERSION or record["method"] != policy.method or
+        if (record["protocol_version"] != sim.decision_protocol_version or
+                request.protocol_version != sim.decision_protocol_version or
+                record["policy_version"] != policy_version(state["policy_spec"]) or record["method"] != policy.method or
                 record["command"] != committed or request.context.window_start != committed["window_start"]):
             raise ValueError("decision ledger identity/command mismatch")
         if request.parameters != ModelParameters.from_config(sim.config):
@@ -206,7 +230,7 @@ def validate_decision_records(sim):
         if ids and (selected not in ids or next(row["command"] for row in pool if row["id"] == selected) != committed):
             raise ValueError("decision selection differs from committed candidate")
         branches, budget = record["branches"], record["budget"]
-        allocated = (0 if len(pool) < 2 or policy.method == "jev-direct" else
+        allocated = (0 if len(pool) < 2 or policy.method in {"jev-direct", "local-direct"} else
                      min(policy.top_k, len(pool)) * policy.scenarios_per_candidate)
         if (budget["version"] != BUDGET_VERSION or budget["actual_M"] != len(pool) or
                 budget["actual_des"] != len(branches) or budget["allocated_des"] != allocated or

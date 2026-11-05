@@ -428,7 +428,7 @@ def check_weekly_runtime(runtime, simulation, expected_fingerprint, *, require_i
     """Validate the actual weekly identities without substituting legacy versions."""
     for name, expected in (("schema_version", PROVENANCE_SCHEMA_VERSION),
                            ("audit_state_schema_version", AUDIT_STATE_SCHEMA_VERSION),
-                           ("checkpoint_schema_version", WEEKLY_CHECKPOINT_SCHEMA_VERSION),
+                           ("checkpoint_schema_version", simulation.checkpoint_schema_version),
                            ("model_version", WEEKLY_MODEL_VERSION),
                            ("rng_protocol_version", KEYED_RNG_PROTOCOL_VERSION)):
         require(type(runtime.get(name)) is type(expected) and runtime.get(name) == expected,
