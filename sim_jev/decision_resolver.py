@@ -41,6 +41,12 @@ def _adapter(policy, runtime):
 def resolve_decision(request, policy, runtime=None):
     if isinstance(policy, PolicySpec):
         return DecisionResult(choose_command(request.observation, request.context, policy))
+    from .qwen_pointer import CandidateHeadPolicySpec
+    if isinstance(policy, CandidateHeadPolicySpec):
+        from .head_decision import HeadDecisionRuntime
+        if not isinstance(runtime, HeadDecisionRuntime):
+            raise ValueError('head policy requires its explicit loaded runtime')
+        return runtime.decide(request, policy)
     return resolve_candidates(request, policy, runtime)
 
 
